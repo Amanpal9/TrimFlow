@@ -1,0 +1,29 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run unit tests
+        run: .\test.bat
+
+      - name: Build TrimFlow.exe
+        run: .\build.bat
+
+      - name: Smoke test CLI status
+        run: .\TrimFlow.exe --status
+
+      - name: Upload TrimFlow binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrimFlow-x64
+          path: TrimFlow.exe
