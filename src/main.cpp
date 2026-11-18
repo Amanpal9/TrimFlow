@@ -409,6 +409,25 @@ PassReport RunOptimizationPass(bool statusOnly, bool forceTrimVisible) {
     bool protectVis = g_protectVisible && !forceTrimVisible && !gameBoostActive;
     ULONGLONG nowTick = GetTickCount64();
 
+    // Identify the single most active renderer/worker per foreground application so only the active tab
+    // stays uncompressed while all other background tabs and background app helpers are compressed.
+    std::map<DWORD, ULONGLONG> pidDeltas;
+    DWORD topForegroundRendererPid = 0;
+    ULONGLONG topForegroundRendererDelta = 0;
+
+    for (const auto& sp : procs) {
+        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, sp.pid);
+        if (!h) continue;
+        ULONGLONG cpu2 = QueryCpuTime(h);
+        CloseHandle(h);
+        ULONGLONG delta = cpu2 >= sp.cpu1 ? (cpu2 - sp.cpu1) : 0;
+        pidDeltas[sp.pid] = delta;
+        if (sp.name == fgExeName && sp.role == SubprocRole::RendererOrWorker && delta > topForegroundRendererDelta) {
+            topForegroundRendererDelta = delta;
+            topForegroundRendererPid = sp.pid;
+        }
+    }
+
     AcquireSRWLockExclusive(&g_histLock);
     for (const auto& sp : procs) {
         auto& a = rep.apps[sp.name];
@@ -426,25 +445,27 @@ PassReport RunOptimizationPass(bool statusOnly, bool forceTrimVisible) {
             continue;
         }
 
-        ULONGLONG cpu2 = QueryCpuTime(h);
-        ULONGLONG delta = cpu2 >= sp.cpu1 ? (cpu2 - sp.cpu1) : 0;
-        // 1000 ms = 10,000,000 100ns units. 1.5% of one core = 150,000 units.
-        bool cpuActive = delta > 150000;
-        bool isForeground = (sp.pid == winState.fgPid);
+        ULONGLONG delta = pidDeltas[sp.pid];
+        bool isForegroundWindowProc = (sp.pid == winState.fgPid);
+        bool isForegroundApp = (sp.name == fgExeName);
         bool ownsVisibleWindow = protectVis && (winState.visiblePids.count(sp.pid) != 0);
-        bool appHasVisibleWindow = protectVis && (visibleAppGroups.count(sp.name) != 0);
 
-        // Role-based protection rules:
+        // Protection policy:
         // 1. Audio & Network subprocesses are NEVER throttled or trimmed.
-        // 2. GPU Compositor and Root UI processes are protected whenever the app's window is visible on screen.
-        // 3. Background Renderer tabs (--type=renderer) are always eligible for compression unless actively using CPU!
-        bool roleProtected = (sp.role == SubprocRole::AudioOrNetwork) ||
-                             (appHasVisibleWindow && (sp.role == SubprocRole::GpuCompositor || sp.role == SubprocRole::MainOrStandalone) &&
-                              ownsVisibleWindow) ||
-                             (appHasVisibleWindow && sp.role == SubprocRole::GpuCompositor);
+        // 2. The foreground window process itself is NEVER trimmed.
+        // 3. For the foreground app, its GPU compositor and its #1 active renderer tab stay protected.
+        // 4. For non-foreground apps, only a visible main UI window (when protectVis is on) or heavily
+        //    active worker (> 15% single-core CPU, e.g. active compilation/render) is protected; all
+        //    idle/heartbeat utility & renderer subprocesses (like background VS Code extension hosts) are compressed!
+        bool protectedProc = (sp.role == SubprocRole::AudioOrNetwork) ||
+                             isForegroundWindowProc ||
+                             (isForegroundApp && sp.role == SubprocRole::GpuCompositor) ||
+                             (isForegroundApp && sp.pid == topForegroundRendererPid) ||
+                             (ownsVisibleWindow && sp.role == SubprocRole::MainOrStandalone) ||
+                             (!forceTrimVisible && delta > 1500000ULL);  // > 15% of a core = real background job
 
         ProcHistory& hist = g_procHistory[sp.pid];
-        if (isForeground || cpuActive || ownsVisibleWindow || roleProtected) {
+        if (protectedProc) {
             a.activeProcs++;
             if (hist.throttled) {
                 SetProcessThrottleState(h, false);

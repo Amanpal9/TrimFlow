@@ -73,8 +73,8 @@ inline SubprocRole ClassifyCommandLine(const std::wstring& rawCmdLine, int group
     if (groupCount <= 1 || rawCmdLine.empty()) return SubprocRole::MainOrStandalone;
     std::wstring cmd = LowerStr(rawCmdLine);
 
-    if (cmd.find(L"audioservice") != std::wstring::npos ||
-        cmd.find(L"networkservice") != std::wstring::npos ||
+    if (cmd.find(L"audio.mojom.audioservice") != std::wstring::npos ||
+        cmd.find(L"network.mojom.networkservice") != std::wstring::npos ||
         cmd.find(L"--utility-sub-type=audio") != std::wstring::npos) {
         return SubprocRole::AudioOrNetwork;
     }
